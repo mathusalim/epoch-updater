@@ -1,5 +1,5 @@
 import { app, ipcMain, shell } from 'electron';
-import { ClientManager } from './client';
+import { clientManager } from './client';
 import { updateManager, UpdateState } from './updater';
 import { windowManager } from './window';
 import { settingsManager } from './settings';
@@ -28,7 +28,7 @@ export const main = (() => {
       shell.openExternal(args);
     });
     ipcMain.on('choose-install-directory', () => {
-      ClientManager.chooseDirectory(() => {
+      clientManager.chooseDirectory(() => {
         setTimeout(() => {
           updateManager.setState(UpdateState.GET_MANIFEST);
           updateManager.getManifest();
@@ -45,7 +45,7 @@ export const main = (() => {
       updateManager.cancel();
     });
     ipcMain.on('play-game', () => {
-      ClientManager.open();
+      clientManager.open();
 
       setTimeout(() => {
         app.quit();
@@ -103,8 +103,8 @@ export const main = (() => {
 
     /** User has either not set directory yet or has moved their client. */
     if (
-      !ClientManager.hasClientDirectory() ||
-      !ClientManager.isWarcraftDirectory(ClientManager.getClientDirectory())
+      !clientManager.hasClientDirectory() ||
+      !clientManager.isWarcraftDirectory(clientManager.getClientDirectory())
     ) {
       updateManager.setState(UpdateState.SETUP);
       return;

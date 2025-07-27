@@ -1,7 +1,7 @@
 import { app, net } from 'electron';
 import { windowManager } from './window';
 import fs from 'fs';
-import { ClientManager } from './client';
+import { clientManager } from './client';
 import { DownloaderHelper } from 'node-downloader-helper';
 import md5File from 'md5-file';
 import { settingsManager } from './settings';
@@ -135,7 +135,7 @@ export const updateManager = (() => {
     /** Check UAC */
     const elevated = await isElevated();
     if (
-      ClientManager.requiresElevation(ClientManager.getClientDirectory()) &&
+      clientManager.requiresElevation(clientManager.getClientDirectory()) &&
       !elevated
     ) {
       setState(UpdateState.REQUIRES_ELEVATION);
@@ -147,12 +147,12 @@ export const updateManager = (() => {
       .get()
       .webContents.send(
         'client-directory-loaded',
-        ClientManager.getClientDirectory()
+        clientManager.getClientDirectory()
       );
 
     for (let index = 0; index < manifest.Files.length; index++) {
       let element = manifest.Files[index];
-      let localPath = `${ClientManager.getClientDirectory()}\\${element.Path}`;
+      let localPath = `${clientManager.getClientDirectory()}\\${element.Path}`;
 
       /** Doesn't Exist. Just Download. */
       if (!fs.existsSync(localPath)) {
@@ -238,7 +238,7 @@ export const updateManager = (() => {
       let filename = parts[parts.length - 1];
 
       /** Figure out Directory. */
-      let clientDir = ClientManager.getClientDirectory();
+      let clientDir = clientManager.getClientDirectory();
       let downloadDir = element.Path.split(filename)[0];
       let directory = `${clientDir}\\${downloadDir}`;
 
