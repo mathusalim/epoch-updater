@@ -1,6 +1,6 @@
 import { app, ipcMain, shell } from 'electron';
 import { ClientManager } from './client';
-import { UpdateManager, UpdateState } from './updater';
+import { updateManager, UpdateState } from './updater';
 import { windowManager } from './window';
 import { settingsManager } from './settings';
 
@@ -30,19 +30,19 @@ export const main = (() => {
     ipcMain.on('choose-install-directory', () => {
       ClientManager.chooseDirectory(() => {
         setTimeout(() => {
-          UpdateManager.setState(UpdateState.GET_MANIFEST);
-          UpdateManager.getManifest();
+          updateManager.setState(UpdateState.GET_MANIFEST);
+          updateManager.getManifest();
         }, 1000);
       });
     });
     ipcMain.on('refresh-update-state', () => {
-      UpdateManager.refresh();
+      updateManager.refresh();
     });
     ipcMain.on('update-button-click', () => {
-      UpdateManager.downloadUpdates();
+      updateManager.downloadUpdates();
     });
     ipcMain.on('on-cancel-button-clicked', () => {
-      UpdateManager.cancel();
+      updateManager.cancel();
     });
     ipcMain.on('play-game', () => {
       ClientManager.open();
@@ -78,8 +78,8 @@ export const main = (() => {
    * Fires when the app is quitting.
    */
   const onAppQuit = () => {
-    if (UpdateManager.getState() === UpdateState.DOWNLOADING) {
-      UpdateManager.cancel();
+    if (updateManager.getState() === UpdateState.DOWNLOADING) {
+      updateManager.cancel();
     }
   };
 
@@ -106,13 +106,13 @@ export const main = (() => {
       !ClientManager.hasClientDirectory() ||
       !ClientManager.isWarcraftDirectory(ClientManager.getClientDirectory())
     ) {
-      UpdateManager.setState(UpdateState.SETUP);
+      updateManager.setState(UpdateState.SETUP);
       return;
     }
 
     /** Otherwise - Go to patching. */
-    UpdateManager.setState(UpdateState.GET_MANIFEST);
-    UpdateManager.getManifest();
+    updateManager.setState(UpdateState.GET_MANIFEST);
+    updateManager.getManifest();
   };
 
   return {

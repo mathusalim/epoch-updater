@@ -1,339 +1,403 @@
-import { app, net } from "electron";
-import { WindowManager } from "./window";
+import { app, net } from 'electron';
+import { windowManager } from './window';
 import fs from 'fs';
-import { ClientManager } from "./client";
-import { DownloaderHelper } from "node-downloader-helper";
+import { ClientManager } from './client';
+import { DownloaderHelper } from 'node-downloader-helper';
 import md5File from 'md5-file';
-import { SettingsManager } from "./settings";
-import isElevated from "is-elevated";
-let log = require("electron-log")
+import { settingsManager } from './settings';
+import isElevated from 'is-elevated';
+let log = require('electron-log');
 
 /**
  * The various States of the Updater Process.
  */
 export enum UpdateState {
-    NONE = 'none',
-    SETUP = 'setup',
-    GET_MANIFEST = 'get-manifest',
-    VERIFYING_INTEGRITY = 'verifying-integrity',
-    UPDATE_AVAILABLE = 'update-available',
-    DOWNLOADING = 'downloading',
-    REQUIRES_ELEVATION = 'requires-elevation',
-    DONE = 'done',
+  NONE = 'none',
+  SETUP = 'setup',
+  GET_MANIFEST = 'get-manifest',
+  VERIFYING_INTEGRITY = 'verifying-integrity',
+  UPDATE_AVAILABLE = 'update-available',
+  DOWNLOADING = 'downloading',
+  REQUIRES_ELEVATION = 'requires-elevation',
+  DONE = 'done',
 }
 
 interface PatchFile {
-    Path: string;
-    Hash: string;
-    Size: number;
-    Custom: boolean;
-    Urls: Record<string, string>; // Map of provider name -> URL
+  Path: string;
+  Hash: string;
+  Size: number;
+  Custom: boolean;
+  Urls: Record<string, string>; // Map of provider name -> URL
 }
 
 interface Manifest {
-    Version: string;
-    Uid: string;
-    Files: PatchFile[];
-    Removals?: string[]; // Optional, per environment
+  Version: string;
+  Uid: string;
+  Files: PatchFile[];
+  Removals?: string[]; // Optional, per environment
 }
-
 /**
- * Centralised class to handle the Updating Process.
+ * Updater Object
  */
-export class Updater {
-    private currentState: UpdateState;
-    private manifestHost: string = 'updater.project-epoch.net';
-    private manifest: Manifest | undefined;
-    private updatableFiles: Array<PatchFile> = [];
-    private remainingFiles: number = 0;
-    private currentDownload: DownloaderHelper;
-    private cancelled: boolean = false;
+export const updateManager = (() => {
+  let currentState: UpdateState;
+  let manifestHost: string = 'updater.project-epoch.net';
+  let manifest: Manifest | undefined;
+  let updatableFiles: Array<PatchFile> = [];
+  let remainingFiles: number = 0;
+  let currentDownload: DownloaderHelper;
+  let cancelled: boolean = false;
 
-    constructor() {
-        this.currentState = UpdateState.NONE;
+  currentState = UpdateState.NONE;
+  /** Dev Mode - Use Local. */
+  if (!app.isPackaged) {
+    manifestHost = 'updater-api.test';
+  }
 
-        /** Dev Mode - Use Local. */
-        if (! app.isPackaged) {
-            this.manifestHost = 'updater-api.test';
-        }
+  /**
+   * Gets the Patch Manifest from our updater API.
+   */
+  const getManifest = () => {
+    let environment = app.isPackaged
+      ? settingsManager.storage().get('environment')
+      : 'development';
+
+    environment = 'production';
+
+    const key = settingsManager.storage().get('key');
+
+    const request = net.request({
+      method: 'GET',
+      protocol: app.isPackaged ? 'https:' : 'https:',
+      hostname: manifestHost,
+      path: `/api/v2/manifest?environment=${environment}&internal_key=${key}`,
+      redirect: 'error',
+    });
+
+    request.on('response', (response) => {
+      let result = '';
+
+      response.on('data', (chunk) => {
+        result += chunk.toString();
+      });
+
+      response.on('end', () => {
+        processManifestResponse(JSON.parse(result));
+      });
+    });
+
+    request.on('error', (error) => {
+      onManifestFailure(error);
+    });
+
+    request.setHeader('Content-Type', 'application/json');
+    request.end();
+  };
+
+  /**
+   * Fires when we've got a response from the Manifest
+   * API endpoint.
+   * @param response
+   */
+  const processManifestResponse = (response: any) => {
+    if (response.hasOwnProperty('Version')) {
+      onManifestReceived(response);
+    } else {
+      console.log('Unexpected Response');
+      console.log(response);
+    }
+  };
+
+  /**
+   * Fired when we have finished loading the Patch Manifest.
+   * @param manifest The Patch Manifest we got.
+   */
+  const onManifestReceived = (manifest: Manifest) => {
+    manifest = manifest;
+    checkIntegrity(manifest);
+  };
+
+  /**
+   * Fired when getting the Manifest Fails.
+   */
+  const onManifestFailure = (error: Error) => {
+    log.error(`Manifest Retrival Failure: ${error.message}`);
+  };
+
+  /**
+   * Begins the process of checking integrity of game files.
+   * @param manifest The Patch Manifest we're using.
+   */
+  const checkIntegrity = async (manifest: Manifest) => {
+    setState(UpdateState.VERIFYING_INTEGRITY);
+    updatableFiles = [];
+
+    /** Check UAC */
+    const elevated = await isElevated();
+    if (
+      ClientManager.requiresElevation(ClientManager.getClientDirectory()) &&
+      !elevated
+    ) {
+      setState(UpdateState.REQUIRES_ELEVATION);
+
+      return;
     }
 
-    /**
-     * Gets the Patch Manifest from our updater API.
-     */
-    getManifest() {
-        let environment = app.isPackaged ? SettingsManager.storage().get('environment') : 'development';
+    windowManager
+      .get()
+      .webContents.send(
+        'client-directory-loaded',
+        ClientManager.getClientDirectory()
+      );
 
-        environment = 'production';
-        
-        const key = SettingsManager.storage().get('key');
+    for (let index = 0; index < manifest.Files.length; index++) {
+      let element = manifest.Files[index];
+      let localPath = `${ClientManager.getClientDirectory()}\\${element.Path}`;
 
-        const request = net.request({
-            method: 'GET',
-            protocol: app.isPackaged ? 'https:' : 'https:',
-            hostname: this.manifestHost,
-            path: `/api/v2/manifest?environment=${environment}&internal_key=${key}`,
-            redirect: 'error'
-        });
+      /** Doesn't Exist. Just Download. */
+      if (!fs.existsSync(localPath)) {
+        updatableFiles.push(element);
+        continue;
+      }
 
-        request.on('response', (response) => {
-            let result = '';
+      /** Fix readonly flag. */
+      const mode = fs.statSync(localPath).mode;
+      fs.chmodSync(localPath, mode | 0o666);
 
-            response.on('data', (chunk) => {
-                result += chunk.toString();
-            });
-
-            response.on('end', () => {
-                this.processManifestResponse(JSON.parse(result));
-            });
-        });
-
-        request.on('error', (error) => {
-            this.onManifestFailure(error);
-        });
-
-        request.setHeader('Content-Type', 'application/json');
-        request.end();
-    }
-
-    /**
-     * Fires when we've got a response from the Manifest 
-     * API endpoint.
-     * @param response 
-     */
-    processManifestResponse(response: any) {
-        if (response.hasOwnProperty('Version')) {
-            this.onManifestReceived(response);
-        } else {
-            console.log('Unexpected Response');
-            console.log(response);
-        }
-    }
-
-    /**
-     * Fired when we have finished loading the Patch Manifest.
-     * @param manifest The Patch Manifest we got.
-     */
-    onManifestReceived(manifest: Manifest) {
-        this.manifest = manifest;
-        this.checkIntegrity(manifest);
-    }
-
-    /**
-     * Fired when getting the Manifest Fails.
-     */
-    onManifestFailure(error: Error) {
-        log.error(`Manifest Retrival Failure: ${error.message}`);
-    }
-
-    /**
-     * Begins the process of checking integrity of game files.
-     * @param manifest The Patch Manifest we're using.
-     */
-    async checkIntegrity(manifest: Manifest) {
-        this.setState(UpdateState.VERIFYING_INTEGRITY);
-        this.updatableFiles = [];
-
-        /** Check UAC */
-        const elevated = await isElevated();
-        if (ClientManager.requiresElevation(ClientManager.getClientDirectory()) && ! elevated) {
-            this.setState(UpdateState.REQUIRES_ELEVATION);
-
-            return;
-        }
-
-        WindowManager.get().webContents.send('client-directory-loaded', ClientManager.getClientDirectory());
-
-        for (let index = 0; index < manifest.Files.length; index++) {
-            let element = manifest.Files[index];
-            let localPath = `${ClientManager.getClientDirectory()}\\${element.Path}`;
-
-            /** Doesn't Exist. Just Download. */
-            if (! fs.existsSync(localPath)) {
-                this.updatableFiles.push(element);
-                continue;
-            }
-
-            /** Fix readonly flag. */
-            const mode = fs.statSync(localPath).mode;
-            fs.chmodSync(localPath, mode | 0o666);
-
-            /** Blizzard File - Just check number of bytes. */
-            if (! element.Custom) {
-                let size = fs.statSync(localPath).size;
-                if (element.Size !== size) {
-                    this.updatableFiles.push(element);
-                }
-
-                continue;
-            }
-
-            /** Custom File. Actually Hash Check. */
-            await this.checkHash(element, localPath);
-        }
-
-        /** Need to download every file. Must be new. */
-        if (this.updatableFiles.length === manifest.Files.length) {
-            this.downloadUpdates();
-            return;
+      /** Blizzard File - Just check number of bytes. */
+      if (!element.Custom) {
+        let size = fs.statSync(localPath).size;
+        if (element.Size !== size) {
+          updatableFiles.push(element);
         }
 
-        if (this.updatableFiles.length > 0) {
-            /** Only some files. Must be an update. */
-            this.setState(UpdateState.UPDATE_AVAILABLE);
-            WindowManager.get().webContents.send('version-received', this.manifest.Version);
-        } else {
-            this.setState(UpdateState.DONE);
-        }
+        continue;
+      }
+
+      /** Custom File. Actually Hash Check. */
+      await checkHash(element, localPath);
     }
 
-    /**
-     * Generates an MD5 hash for the given file and if not 
-     * matching then marks as requiring update.
-     * @param file Our Patch Manifest File Entry.
-     * @param localPath The path on disk for where it is.
-     */
-    async checkHash(file: PatchFile, localPath: string) {
-        await md5File(localPath).then((hash) => {
-            if (hash !== file.Hash) {
-                this.updatableFiles.push(file);
-            }
-        });
+    /** Need to download every file. Must be new. */
+    if (updatableFiles.length === manifest.Files.length) {
+      downloadUpdates();
+      return;
     }
 
-    /**
-     * Sets our state to Downloading and begins the 
-     * process of downloading any updates we had 
-     * remaining.
-     */
-    async downloadUpdates() {
-        this.setState(UpdateState.DOWNLOADING);
-        this.remainingFiles = this.updatableFiles.length;
-        this.cancelled = false;
+    if (updatableFiles.length > 0) {
+      /** Only some files. Must be an update. */
+      setState(UpdateState.UPDATE_AVAILABLE);
+      windowManager
+        .get()
+        .webContents.send('version-received', manifest.Version);
+    } else {
+      setState(UpdateState.DONE);
+    }
+  };
 
-        let cdnProvider = SettingsManager.storage().get('cdnProvider');
+  /**
+   * Generates an MD5 hash for the given file and if not
+   * matching then marks as requiring update.
+   * @param file Our Patch Manifest File Entry.
+   * @param localPath The path on disk for where it is.
+   */
+  const checkHash = async (file: PatchFile, localPath: string) => {
+    await md5File(localPath).then((hash) => {
+      if (hash !== file.Hash) {
+        updatableFiles.push(file);
+      }
+    });
+  };
 
-        log.info(`Commencing Download of ${this.updatableFiles.length} Files Using CDN: ${cdnProvider}`);
+  /**
+   * Sets our state to Downloading and begins the
+   * process of downloading any updates we had
+   * remaining.
+   */
+  const downloadUpdates = async () => {
+    setState(UpdateState.DOWNLOADING);
+    remainingFiles = updatableFiles.length;
+    cancelled = false;
 
-        for (let index = 0; index < this.updatableFiles.length; index++) {
-            const element = this.updatableFiles[index];
+    let cdnProvider = settingsManager.storage().get('cdnProvider');
 
-            /** If we've cancelled don't process any more. */
-            if (this.cancelled) {
-                continue;
-            }
+    log.info(
+      `Commencing Download of ${updatableFiles.length} Files Using CDN: ${cdnProvider}`
+    );
 
-            /** Figure out filename. */
-            let parts = element.Path.split('\\');
-            let filename = parts[parts.length - 1];
+    for (let index = 0; index < updatableFiles.length; index++) {
+      const element = updatableFiles[index];
 
-            /** Figure out Directory. */
-            let clientDir = ClientManager.getClientDirectory();
-            let downloadDir = element.Path.split(filename)[0];
-            let directory = `${clientDir}\\${downloadDir}`;
+      /** If we've cancelled don't process any more. */
+      if (cancelled) {
+        continue;
+      }
 
-            if (! fs.existsSync(directory)) {
-                fs.mkdirSync(directory, { recursive: true });
-            }
-            
-            await this.download(element.Urls[cdnProvider], directory, filename, index, this.updatableFiles.length);
-        }
+      /** Figure out filename. */
+      let parts = element.Path.split('\\');
+      let filename = parts[parts.length - 1];
 
-        this.checkIntegrity(this.manifest);
+      /** Figure out Directory. */
+      let clientDir = ClientManager.getClientDirectory();
+      let downloadDir = element.Path.split(filename)[0];
+      let directory = `${clientDir}\\${downloadDir}`;
+
+      if (!fs.existsSync(directory)) {
+        fs.mkdirSync(directory, { recursive: true });
+      }
+
+      await download(
+        element.Urls[cdnProvider],
+        directory,
+        filename,
+        index,
+        updatableFiles.length
+      );
     }
 
-    /**
-     * Attempts to cancel the current downloads.
-     */
-    async cancel() {
-        this.cancelled = true;
-        await this.currentDownload.stop();
-        this.checkIntegrity(this.manifest);
-    }
+    checkIntegrity(manifest);
+  };
 
-    /**
-     * Attempts to download a file from our CDN.
-     * @param url The URL of the file we're downloading.
-     * @param directory The directory where we should save it.
-     * @param filename The filename to give it.
-     * @param index And out of all our downloads which is this.
-     * @param total How many total files do we have.
-     */
-    async download(url: string, directory: string, filename: string, index: number, total: number) {
-        this.currentDownload = new DownloaderHelper(url, directory, {
-            fileName: filename,
-            override: true,
-            removeOnStop: false,
-            removeOnFail: false,
-            timeout: 60000,
-            resumeIfFileExists: false,
-            progressThrottle: 1000,
-            retry: {
-                maxRetries: 3,
-                delay: 10000,
-            },
-        });
+  /**
+   * Attempts to cancel the current downloads.
+   */
+  const cancel = async () => {
+    cancelled = true;
+    await currentDownload.stop();
+    checkIntegrity(manifest);
+  };
 
-        this.remainingFiles--;
+  /**
+   * Attempts to download a file from our CDN.
+   * @param url The URL of the file we're downloading.
+   * @param directory The directory where we should save it.
+   * @param filename The filename to give it.
+   * @param index And out of all our downloads which is
+   * @param total How many total files do we have.
+   */
+  const download = async (
+    url: string,
+    directory: string,
+    filename: string,
+    index: number,
+    total: number
+  ) => {
+    currentDownload = new DownloaderHelper(url, directory, {
+      fileName: filename,
+      override: true,
+      removeOnStop: false,
+      removeOnFail: false,
+      timeout: 60000,
+      resumeIfFileExists: false,
+      progressThrottle: 1000,
+      retry: {
+        maxRetries: 3,
+        delay: 10000,
+      },
+    });
 
-        this.currentDownload.on('start', () => {
-            log.info(`Beginning Download: ${filename} - Remaining: ${this.remainingFiles}`);
+    remainingFiles--;
 
-            WindowManager.get().webContents.send('download-started', filename, this.remainingFiles, index + 1, total);
-        });
+    currentDownload.on('start', () => {
+      log.info(
+        `Beginning Download: ${filename} - Remaining: ${remainingFiles}`
+      );
 
-        this.currentDownload.on('progress', (stats) => { 
-            WindowManager.get().webContents.send('download-progress', stats.total, stats.name, stats.downloaded, stats.progress, stats.speed);
-        });
+      windowManager
+        .get()
+        .webContents.send(
+          'download-started',
+          filename,
+          remainingFiles,
+          index + 1,
+          total
+        );
+    });
 
-        this.currentDownload.on('progress.throttled', (stats) => {
-            WindowManager.get().webContents.send('download-progress-throttled', stats.total, stats.name, stats.downloaded, stats.progress, stats.speed);
-        });
+    currentDownload.on('progress', (stats) => {
+      windowManager
+        .get()
+        .webContents.send(
+          'download-progress',
+          stats.total,
+          stats.name,
+          stats.downloaded,
+          stats.progress,
+          stats.speed
+        );
+    });
 
-        this.currentDownload.on('error', (stats) => {
-            log.error(`Download Failed - Message (${stats.message}) - Status (${stats.status}) - Body: (${stats.body})`);
-            console.log(`Message: ${stats.message} - Status: ${stats.status} - Body: ${stats.body}`);
-        });
+    currentDownload.on('progress.throttled', (stats) => {
+      windowManager
+        .get()
+        .webContents.send(
+          'download-progress-throttled',
+          stats.total,
+          stats.name,
+          stats.downloaded,
+          stats.progress,
+          stats.speed
+        );
+    });
 
-        this.currentDownload.on('end', (stats) => {
-            log.info(`Download Complete: ${stats.fileName} - Total Size (${stats.totalSize}) - Disk Size (${stats.onDiskSize}) - Success: ${stats.incomplete ? 'False' : 'True'}`);
+    currentDownload.on('error', (stats) => {
+      log.error(
+        `Download Failed - Message (${stats.message}) - Status (${stats.status}) - Body: (${stats.body})`
+      );
+      console.log(
+        `Message: ${stats.message} - Status: ${stats.status} - Body: ${stats.body}`
+      );
+    });
 
-            WindowManager.get().webContents.send('download-finished');
-        });
+    currentDownload.on('end', (stats) => {
+      log.info(
+        `Download Complete: ${stats.fileName} - Total Size (${
+          stats.totalSize
+        }) - Disk Size (${stats.onDiskSize}) - Success: ${
+          stats.incomplete ? 'False' : 'True'
+        }`
+      );
 
-        this.currentDownload.on('stop', () => {
-            log.info(`Download Stopped`);
-        });
+      windowManager.get().webContents.send('download-finished');
+    });
 
-        await this.currentDownload.start();
-    }
+    currentDownload.on('stop', () => {
+      log.info(`Download Stopped`);
+    });
 
-    /**
-     * Sets the latest Updater State and fires it to the Frontend.
-     * @param state The new state.
-     */
-    setState(state: UpdateState) {
-        this.currentState = state;
+    await currentDownload.start();
+  };
 
-        this.refresh();
-    }
+  /**
+   * Sets the latest Updater State and fires it to the Frontend.
+   * @param state The new state.
+   */
+  const setState = (state: UpdateState) => {
+    currentState = state;
 
-    /**
-     * Forces a Frontend "Refresh" of the Update State by just sending it.
-     */
-    refresh() {
-        WindowManager.get().webContents.send('update-state-changed', this.getState());
-    }
+    refresh();
+  };
 
-    /**
-     * Gets our current Update State.
-     */
-    getState(): UpdateState {
-        return this.currentState;
-    }
-}
+  /**
+   * Forces a Frontend "Refresh" of the Update State by just sending it.
+   */
+  const refresh = () => {
+    windowManager.get().webContents.send('update-state-changed', getState());
+  };
 
-/**
- * Constant instance of the Updater Class.
- */
-export const UpdateManager = new Updater();
+  /**
+   * Gets our current Update State.
+   */
+  const getState = (): UpdateState => {
+    return currentState;
+  };
+
+  return {
+    getManifest,
+    downloadUpdates,
+    cancel,
+    setState,
+    refresh,
+    getState,
+  };
+})();
