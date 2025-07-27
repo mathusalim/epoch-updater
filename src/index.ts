@@ -1,5 +1,5 @@
 import { app } from 'electron';
-import Main from './ts/backend/main';
+import { main } from './ts/backend/main';
 import unhandled from 'electron-unhandled';
 
 /**
@@ -18,4 +18,4 @@ if (app.isPackaged) {
 }
 
 unhandled();
-Main.start();
+main.start();

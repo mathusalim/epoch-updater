@@ -1,7 +1,7 @@
 import { app, ipcMain, shell } from 'electron';
 import { ClientManager } from './client';
 import { UpdateManager, UpdateState } from './updater';
-import { WindowManager } from './window';
+import { windowManager } from './window';
 import { SettingsManager } from './settings';
 
 /**
@@ -12,7 +12,7 @@ import { SettingsManager } from './settings';
 declare const MAIN_WINDOW_WEBPACK_ENTRY: string;
 declare const MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY: string;
 
-const main = (() => {
+export const main = (() => {
   /**
    * Registers our Inter Process Communications.
    */
@@ -22,7 +22,7 @@ const main = (() => {
       app.quit();
     });
     ipcMain.on('window-minimize', () => {
-      WindowManager.get().minimize();
+      windowManager.get().minimize();
     });
     ipcMain.on('link-clicked', (event, args) => {
       shell.openExternal(args);
@@ -68,7 +68,7 @@ const main = (() => {
    * Some APIs can only be used after this event occurs.
    */
   const onReady = () => {
-    WindowManager.create(
+    windowManager.create(
       MAIN_WINDOW_WEBPACK_ENTRY,
       MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY
     );
@@ -95,12 +95,11 @@ const main = (() => {
    * up our initial updater state.
    */
   const onWindowRendered = () => {
-    WindowManager.get().show();
+    windowManager.get().show();
 
-    WindowManager.get().webContents.send(
-      'launcher-version-received',
-      app.getVersion()
-    );
+    windowManager
+      .get()
+      .webContents.send('launcher-version-received', app.getVersion());
 
     /** User has either not set directory yet or has moved their client. */
     if (
@@ -126,5 +125,3 @@ const main = (() => {
     },
   };
 })();
-
-export default main;
