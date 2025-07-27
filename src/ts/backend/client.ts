@@ -1,7 +1,7 @@
 import { settingsManager } from './settings';
 import fs from 'fs-extra';
 import { windowManager } from './window';
-import { dialog } from 'electron';
+import { dialog, OpenDialogReturnValue } from 'electron';
 import os from 'os';
 import cp from 'child_process';
 
@@ -15,7 +15,6 @@ export const clientManager = (() => {
       title: 'Choose Client Directory',
       properties: ['openDirectory'],
     });
-
     let dir = result.filePaths[0];
 
     /** Pressed Cancel. */
@@ -127,7 +126,12 @@ export const clientManager = (() => {
     checksToUse.forEach((check) => {
       if (!valid) return;
 
-      if (!fs.existsSync(`${path}\\${check}`)) valid = false;
+      if (
+        !fs.existsSync(
+          isLinux || isMac ? `${path}/${check}` : `${path}\\${check}`
+        )
+      )
+        valid = false;
     });
 
     return valid;
